@@ -1,0 +1,66 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
+    // Role lives in Firestore (set only via the console), never in client storage.
+    function isAdmin() {
+      return signedIn() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      // Registration: role is forced to citizen, status to active.
+      allow create: if isOwner(uid)
+        && request.resource.data.keys().hasOnly(['uid','fullName','email','role','createdAt','accountStatus'])
+        && request.resource.data.uid == uid
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.role == 'citizen'
+        && request.resource.data.accountStatus == 'active'
+        && request.resource.data.createdAt == request.time;
+      // Owners may change only their name; admins may change only account status.
+      allow update: if (isOwner(uid) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['fullName']))
+        || (isAdmin() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['accountStatus']));
+      allow delete: if false;
+    }
+
+    match /complaints/{id} {
+      allow read: if isOwner(resource.data.userId) || isAdmin();
+      allow create: if isOwner(request.resource.data.userId)
+        && request.resource.data.status == 'Submitted'
+        && request.resource.data.priority == 'Normal'
+        && request.resource.data.adminRemarks == ''
+        && request.resource.data.title is string && request.resource.data.title.size() <= 120
+        && request.resource.data.description is string && request.resource.data.description.size() <= 2000
+        && request.resource.data.createdAt == request.time;
+      // Only administrators change status, priority and remarks.
+      allow update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /complaintHistory/{id} {
+      allow read: if isOwner(resource.data.userId) || isAdmin();
+      allow create: if isAdmin()
+        || (isOwner(request.resource.data.userId) && request.resource.data.status == 'Submitted');
+      allow update, delete: if false;
+    }
+
+    match /notifications/{id} {
+      allow read: if isOwner(resource.data.userId);
+      allow create: if isAdmin()
+        || (isOwner(request.resource.data.userId) && request.resource.data.type == 'submitted');
+      // Owners may only mark their own notifications as read.
+      allow update: if isOwner(resource.data.userId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+      allow delete: if false;
+    }
+
+    // Public aggregate counters for the landing page; written by the admin dashboard.
+    match /stats/summary {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+  }
+}
